@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -62,7 +63,7 @@ func (s *Server) ServeConn(ctx context.Context, client net.Conn) error {
 	}
 	host, port, err := readConnectRequest(client)
 	if err != nil {
-		_ = writeReply(client, replyCommandUnsupported)
+		_ = writeReply(client, requestReplyCode(err))
 		return err
 	}
 	_ = client.SetDeadline(time.Time{})
@@ -162,8 +163,29 @@ func readConnectRequest(r io.Reader) (string, uint16, error) {
 
 func writeReply(w io.Writer, code byte) error {
 	// A wildcard IPv4 bind address and port zero are sufficient for CONNECT.
-	_, err := w.Write([]byte{version5, code, 0x00, addressIPv4, 0, 0, 0, 0, 0, 0})
-	return err
+	payload := []byte{version5, code, 0x00, addressIPv4, 0, 0, 0, 0, 0, 0}
+	for len(payload) > 0 {
+		n, err := w.Write(payload)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		payload = payload[n:]
+	}
+	return nil
+}
+
+func requestReplyCode(err error) byte {
+	switch {
+	case strings.Contains(err.Error(), "unsupported SOCKS command"):
+		return replyCommandUnsupported
+	case strings.Contains(err.Error(), "unsupported address type"):
+		return replyAddressUnsupported
+	default:
+		return replyFailure
+	}
 }
 
 func mapDialError(err error) byte {
