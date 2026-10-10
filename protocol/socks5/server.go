@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"syscall"
 	"time"
 
 	"proxy/connection"
@@ -178,8 +179,4 @@ func mapDialError(err error) byte {
 	return replyFailure
 }
 
-func syscallConnectionRefused() error {
-	// Compare against the platform's standard connection-refused error without
-	// exposing platform-specific error handling to the protocol implementation.
-	return errors.New("connection refused")
-}
+func syscallConnectionRefused() error { return syscall.ECONNREFUSED }
