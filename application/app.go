@@ -61,6 +61,17 @@ func (a *App) Run(ctx context.Context) error {
 		go func() {
 			defer clients.Done()
 			defer conn.Close()
+
+			done := make(chan struct{})
+			go func() {
+				select {
+				case <-ctx.Done():
+					_ = conn.Close()
+				case <-done:
+				}
+			}()
+			defer close(done)
+
 			if err := a.server.ServeConn(ctx, conn); err != nil && ctx.Err() == nil {
 				log.Printf("client %s: %v", conn.RemoteAddr(), err)
 			}
