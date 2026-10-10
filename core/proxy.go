@@ -1,59 +1,65 @@
-
 package core
 
 import (
+	"errors"
 	"io"
+	"sync"
+
+	"proxy/connection"
 )
 
-// Proxy هسته اصلی Proxy را مدیریت می‌کند.
-type Proxy struct {
-}
+// Proxy relays bytes between the two ends of a session.
+type Proxy struct{}
 
-// NewProxy یک Proxy جدید ایجاد می‌کند.
-func NewProxy() *Proxy {
-	return &Proxy{}
-}
+func NewProxy() *Proxy { return &Proxy{} }
 
-// Handle یک Session را اجرا می‌کند.
-//
-// Session شامل Local و Remote Connection است.
-// Proxy وظیفه دارد داده را در هر دو جهت بین این دو Connection
-// منتقل کند.
+// Handle runs both copy directions. A clean EOF half-closes the opposite
+// write side; a real copy error or completion of both directions ends the session.
 func (p *Proxy) Handle(session *Session) error {
 	if session == nil {
 		return nil
 	}
+	if session.Local == nil || session.Remote == nil {
+		_ = session.Close()
+		return errors.New("proxy session requires local and remote connections")
+	}
 
 	session.Start()
+	results := make(chan copyResult, 2)
+	var once sync.Once
 
-	errCh := make(chan error, 2)
-
-	// Local → Remote
-	go func() {
-		n, err := io.Copy(session.Remote, session.Local)
-
+	copyDirection := func(dst, src connection.Connection, sent bool) {
+		n, err := io.Copy(dst, src)
 		if n > 0 {
-			session.AddSentBytes(uint64(n))
+			if sent {
+				session.AddSentBytes(uint64(n))
+			} else {
+				session.AddReceivedBytes(uint64(n))
+			}
 		}
 
-		errCh <- err
-	}()
-
-	// Remote → Local
-	go func() {
-		n, err := io.Copy(session.Local, session.Remote)
-
-		if n > 0 {
-			session.AddReceivedBytes(uint64(n))
+		// Preserve TCP half-close semantics when the source reaches EOF.
+		if err == nil {
+			if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+				err = cw.CloseWrite()
+			}
 		}
+		results <- copyResult{err: err}
+	}
 
-		errCh <- err
-	}()
+	go copyDirection(session.Remote, session.Local, true)
+	go copyDirection(session.Local, session.Remote, false)
 
-	// با پایان یکی از مسیرها، Session را می‌بندیم.
-	err := <-errCh
-
-	session.Close()
-
-	return err
+	var firstErr error
+	for i := 0; i < 2; i++ {
+		result := <-results
+		if result.err != nil && !errors.Is(result.err, io.EOF) && firstErr == nil {
+			firstErr = result.err
+			once.Do(func() { _ = session.Close() })
+		}
+	}
+	_ = session.Close()
+	return firstErr
 }
+
+type copyResult struct{ err error }
