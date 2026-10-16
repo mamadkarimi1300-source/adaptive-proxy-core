@@ -16,6 +16,7 @@ type Candidate struct {
 }
 
 type candidateStats struct {
+	attempts uint64
 	samples  uint64
 	ewma     time.Duration
 	failures uint64
@@ -79,7 +80,7 @@ func (d *AdaptiveDialer) orderedCandidates() []Candidate {
 	// Explore one unseen path first; otherwise rank by measured latency plus failure penalty.
 	for i := 0; i < len(ordered); i++ {
 		idx := (d.nextExplore + i) % len(ordered)
-		if d.stats[ordered[idx].Name].samples == 0 {
+		if d.stats[ordered[idx].Name].attempts == 0 {
 			d.nextExplore = (idx + 1) % len(ordered)
 			first := ordered[idx]
 			ordered = append(ordered[:idx], ordered[idx+1:]...)
@@ -109,6 +110,7 @@ func (d *AdaptiveDialer) record(name string, elapsed time.Duration, success bool
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	stats := d.stats[name]
+	stats.attempts++
 	if !success {
 		stats.failures++
 		d.stats[name] = stats
