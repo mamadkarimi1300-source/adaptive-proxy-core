@@ -9,21 +9,12 @@ import (
 )
 
 type testDialer struct {
-	delay time.Duration
-	err   error
+	err error
 	calls int
 }
 
 func (d *testDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	d.calls++
-	if d.delay > 0 {
-		timer := time.NewTimer(d.delay)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done(): return nil, ctx.Err()
-		case <-timer.C:
-		}
-	}
 	if d.err != nil { return nil, d.err }
 	left, right := net.Pipe()
 	_ = right.Close()
@@ -31,8 +22,8 @@ func (d *testDialer) DialContext(ctx context.Context, network, address string) (
 }
 
 func TestAdaptiveDialerExploresCandidates(t *testing.T) {
-	fast := &testDialer{delay: time.Millisecond}
-	slow := &testDialer{delay: 15 * time.Millisecond}
+	fast := &testDialer{}
+	slow := &testDialer{}
 	dialer, err := NewAdaptiveDialer(Candidate{Name: "tcp", Dialer: fast}, Candidate{Name: "quic", Dialer: slow})
 	if err != nil { t.Fatal(err) }
 
@@ -44,9 +35,8 @@ func TestAdaptiveDialerExploresCandidates(t *testing.T) {
 	if fast.calls != 1 || slow.calls != 1 {
 		t.Fatalf("expected each candidate to be explored once; tcp=%d quic=%d", fast.calls, slow.calls)
 	}
-	measurements := dialer.Snapshot()
-	if measurements["tcp"] >= measurements["quic"] {
-		t.Fatalf("expected TCP measured faster than QUIC: %#v", measurements)
+	if len(dialer.Snapshot()) != 0 {
+		t.Fatal("empty/short sessions must not be presented as valid throughput samples")
 	}
 }
 
@@ -60,6 +50,25 @@ func TestAdaptiveDialerFallsBackAfterFailure(t *testing.T) {
 	_ = conn.Close()
 	if broken.calls != 1 || working.calls != 1 {
 		t.Fatalf("expected failed path and fallback to be tried; quic=%d tcp=%d", broken.calls, working.calls)
+	}
+}
+
+func TestThroughputEWMAAndSampleThreshold(t *testing.T) {
+	dialer, err := NewAdaptiveDialer(Candidate{Name: "tcp", Dialer: &testDialer{}})
+	if err != nil { t.Fatal(err) }
+	dialer.recordThroughput("tcp", minThroughputSampleBytes-1, time.Second)
+	if len(dialer.Snapshot()) != 0 {
+		t.Fatal("sample below minimum byte threshold must be ignored")
+	}
+	dialer.recordThroughput("tcp", 1_000_000, time.Second)
+	got := dialer.Snapshot()["tcp"]
+	if got < 7.9 || got > 8.1 {
+		t.Fatalf("expected about 8 Mbps, got %.3f Mbps", got)
+	}
+	dialer.recordThroughput("tcp", 2_000_000, time.Second)
+	got = dialer.Snapshot()["tcp"]
+	if got < 9.9 || got > 10.1 {
+		t.Fatalf("expected EWMA about 10 Mbps, got %.3f Mbps", got)
 	}
 }
 
