@@ -9,6 +9,12 @@ import (
 	"time"
 )
 
+const (
+	minThroughputSampleBytes = 512 * 1024
+	minThroughputSampleSpan  = 250 * time.Millisecond
+	megabitsPerSecond        = 1_000_000.0
+)
+
 // Candidate is one configured outbound transport/path.
 type Candidate struct {
 	Name   string
@@ -16,13 +22,14 @@ type Candidate struct {
 }
 
 type candidateStats struct {
-	attempts uint64
-	samples  uint64
-	ewma     time.Duration
-	failures uint64
+	attempts     uint64
+	samples      uint64
+	throughputMbps float64
+	failures     uint64
 }
 
-// AdaptiveDialer ranks configured paths by observed connection setup time.
+// AdaptiveDialer chooses paths using measured goodput from real application traffic.
+// It never sends synthetic payloads to arbitrary public destinations.
 type AdaptiveDialer struct {
 	mu          sync.Mutex
 	candidates  []Candidate
@@ -47,13 +54,13 @@ func NewAdaptiveDialer(candidates ...Candidate) (*AdaptiveDialer, error) {
 	}
 	return &AdaptiveDialer{
 		candidates: append([]Candidate(nil), candidates...),
-		stats: make(map[string]candidateStats, len(candidates)),
-		alpha: 0.25,
+		stats:      make(map[string]candidateStats, len(candidates)),
+		alpha:      0.25,
 	}, nil
 }
 
-// DialContext explores unmeasured paths, then prefers the lowest EWMA latency.
-// If a path fails, it tries the remaining paths before returning an error.
+// DialContext picks an unmeasured candidate for bounded exploration, then the
+// highest observed EWMA throughput. If dialing fails, remaining paths are tried.
 func (d *AdaptiveDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	ordered := d.orderedCandidates()
 	var lastErr error
@@ -61,13 +68,18 @@ func (d *AdaptiveDialer) DialContext(ctx context.Context, network, address strin
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		started := time.Now()
 		conn, err := candidate.Dialer.DialContext(ctx, network, address)
-		d.record(candidate.Name, time.Since(started), err == nil)
-		if err == nil {
-			return conn, nil
+		d.recordAttempt(candidate.Name, err == nil)
+		if err != nil {
+			lastErr = fmt.Errorf("%s path: %w", candidate.Name, err)
+			continue
 		}
-		lastErr = fmt.Errorf("%s path: %w", candidate.Name, err)
+		return &throughputConn{
+			Conn: conn,
+			onClose: func(bytes uint64, span time.Duration) {
+				d.recordThroughput(candidate.Name, bytes, span)
+			},
+		}, nil
 	}
 	return nil, lastErr
 }
@@ -77,10 +89,12 @@ func (d *AdaptiveDialer) orderedCandidates() []Candidate {
 	defer d.mu.Unlock()
 
 	ordered := append([]Candidate(nil), d.candidates...)
-	// Explore one unseen path first; otherwise rank by measured latency plus failure penalty.
+	// Try each candidate at least once and give unmeasured candidates up to
+	// three attempts to produce enough real traffic for a goodput sample.
 	for i := 0; i < len(ordered); i++ {
 		idx := (d.nextExplore + i) % len(ordered)
-		if d.stats[ordered[idx].Name].attempts == 0 {
+		stats := d.stats[ordered[idx].Name]
+		if stats.samples == 0 && stats.attempts < 3 {
 			d.nextExplore = (idx + 1) % len(ordered)
 			first := ordered[idx]
 			ordered = append(ordered[:idx], ordered[idx+1:]...)
@@ -91,48 +105,113 @@ func (d *AdaptiveDialer) orderedCandidates() []Candidate {
 }
 
 func (d *AdaptiveDialer) rank(candidates []Candidate) []Candidate {
-	// Stable insertion sort keeps tie behavior deterministic.
 	for i := 1; i < len(candidates); i++ {
-		for j := i; j > 0 && d.score(d.stats[candidates[j].Name]) < d.score(d.stats[candidates[j-1].Name]); j-- {
+		for j := i; j > 0 && d.score(d.stats[candidates[j].Name]) > d.score(d.stats[candidates[j-1].Name]); j-- {
 			candidates[j], candidates[j-1] = candidates[j-1], candidates[j]
 		}
 	}
 	return candidates
 }
 
-func (d *AdaptiveDialer) score(stats candidateStats) time.Duration {
-	penalty := time.Duration(stats.failures) * time.Second
-	if penalty > 30*time.Second { penalty = 30*time.Second }
-	return stats.ewma + penalty
+func (d *AdaptiveDialer) score(stats candidateStats) float64 {
+	if stats.samples == 0 {
+		return -1 // no valid sample: explore rather than inventing a speed
+	}
+	// Repeated failures reduce preference; successful throughput samples heal the penalty.
+	return stats.throughputMbps / (1 + float64(stats.failures))
 }
 
-func (d *AdaptiveDialer) record(name string, elapsed time.Duration, success bool) {
+func (d *AdaptiveDialer) recordAttempt(name string, success bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	stats := d.stats[name]
 	stats.attempts++
 	if !success {
 		stats.failures++
-		d.stats[name] = stats
-		return
+	} else if stats.failures > 0 {
+		stats.failures--
 	}
-	if stats.samples == 0 {
-		stats.ewma = elapsed
-	} else {
-		stats.ewma = time.Duration(d.alpha*float64(elapsed) + (1-d.alpha)*float64(stats.ewma))
-	}
-	stats.samples++
-	if stats.failures > 0 { stats.failures-- }
 	d.stats[name] = stats
 }
 
-// Snapshot returns observed EWMA connection setup times, keyed by candidate name.
-func (d *AdaptiveDialer) Snapshot() map[string]time.Duration {
+func (d *AdaptiveDialer) recordThroughput(name string, bytes uint64, span time.Duration) {
+	if bytes < minThroughputSampleBytes || span < minThroughputSampleSpan {
+		return
+	}
+	mbps := float64(bytes) * 8 / span.Seconds() / megabitsPerSecond
+	if mbps <= 0 {
+		return
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	result := make(map[string]time.Duration, len(d.stats))
+	stats := d.stats[name]
+	if stats.samples == 0 {
+		stats.throughputMbps = mbps
+	} else {
+		stats.throughputMbps = d.alpha*mbps + (1-d.alpha)*stats.throughputMbps
+	}
+	stats.samples++
+	if stats.failures > 0 {
+		stats.failures--
+	}
+	d.stats[name] = stats
+}
+
+// Snapshot returns measured EWMA application goodput in megabits per second.
+// Paths without enough real traffic are omitted.
+func (d *AdaptiveDialer) Snapshot() map[string]float64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	result := make(map[string]float64, len(d.stats))
 	for name, stats := range d.stats {
-		if stats.samples > 0 { result[name] = stats.ewma }
+		if stats.samples > 0 {
+			result[name] = stats.throughputMbps
+		}
 	}
 	return result
+}
+
+type throughputConn struct {
+	net.Conn
+	mu      sync.Mutex
+	bytes   uint64
+	first   time.Time
+	last    time.Time
+	onClose func(uint64, time.Duration)
+	once    sync.Once
+}
+
+func (c *throughputConn) account(n int) {
+	if n <= 0 { return }
+	now := time.Now()
+	c.mu.Lock()
+	if c.first.IsZero() { c.first = now }
+	c.last = now
+	c.bytes += uint64(n)
+	c.mu.Unlock()
+}
+
+func (c *throughputConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	c.account(n)
+	return n, err
+}
+
+func (c *throughputConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.account(n)
+	return n, err
+}
+
+func (c *throughputConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() {
+		c.mu.Lock()
+		bytes, first, last := c.bytes, c.first, c.last
+		c.mu.Unlock()
+		if !first.IsZero() && !last.Before(first) && c.onClose != nil {
+			c.onClose(bytes, last.Sub(first))
+		}
+	})
+	return err
 }
