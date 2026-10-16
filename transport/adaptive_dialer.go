@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -13,6 +14,9 @@ const (
 	minThroughputSampleBytes = 512 * 1024
 	minThroughputSampleSpan  = 250 * time.Millisecond
 	megabitsPerSecond        = 1_000_000.0
+
+	defaultDestinationRouteTTL = 5 * time.Minute
+	maxDestinationRoutes       = 4096
 )
 
 // Candidate is one configured outbound transport/path.
@@ -22,18 +26,27 @@ type Candidate struct {
 }
 
 type candidateStats struct {
-	attempts     uint64
-	samples      uint64
+	attempts       uint64
+	samples        uint64
 	throughputMbps float64
-	failures     uint64
+	failures       uint64
+}
+
+type routeDecision struct {
+	candidateName string
+	expiresAt     time.Time
 }
 
 // AdaptiveDialer chooses paths using measured goodput from real application traffic.
+// Successful decisions are cached per normalized destination, so new connections to
+// the same host:port keep using the selected path until the decision expires or fails.
 // It never sends synthetic payloads to arbitrary public destinations.
 type AdaptiveDialer struct {
 	mu          sync.Mutex
 	candidates  []Candidate
 	stats       map[string]candidateStats
+	routes      map[string]routeDecision
+	routeTTL    time.Duration
 	nextExplore int
 	alpha       float64
 }
@@ -55,33 +68,141 @@ func NewAdaptiveDialer(candidates ...Candidate) (*AdaptiveDialer, error) {
 	return &AdaptiveDialer{
 		candidates: append([]Candidate(nil), candidates...),
 		stats:      make(map[string]candidateStats, len(candidates)),
+		routes:     make(map[string]routeDecision),
+		routeTTL:   defaultDestinationRouteTTL,
 		alpha:      0.25,
 	}, nil
 }
 
-// DialContext picks an unmeasured candidate for bounded exploration, then the
-// highest observed EWMA throughput. If dialing fails, remaining paths are tried.
+// DialContext uses a cached path for a known destination. On a cache miss, it
+// selects from candidates ranked by observed application goodput and caches the
+// first successful path. If a cached path fails, it is invalidated and fallbacks
+// are tried. Existing connections are never moved between transports.
 func (d *AdaptiveDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	key := destinationKey(network, address)
+	if cached, ok := d.cachedCandidate(key); ok {
+		conn, err := d.dialCandidate(ctx, network, address, cached)
+		if err == nil {
+			return d.wrapConnection(conn, cached.Name), nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		d.invalidateRoute(key, cached.Name)
+		return d.dialFallbacks(ctx, network, address, key, cached.Name)
+	}
+	return d.dialFallbacks(ctx, network, address, key, "")
+}
+
+func (d *AdaptiveDialer) dialFallbacks(ctx context.Context, network, address, key, skipName string) (net.Conn, error) {
 	ordered := d.orderedCandidates()
 	var lastErr error
 	for _, candidate := range ordered {
+		if candidate.Name == skipName {
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		conn, err := candidate.Dialer.DialContext(ctx, network, address)
-		d.recordAttempt(candidate.Name, err == nil)
+		conn, err := d.dialCandidate(ctx, network, address, candidate)
 		if err != nil {
 			lastErr = fmt.Errorf("%s path: %w", candidate.Name, err)
 			continue
 		}
-		return &throughputConn{
-			Conn: conn,
-			onClose: func(bytes uint64, span time.Duration) {
-				d.recordThroughput(candidate.Name, bytes, span)
-			},
-		}, nil
+		d.cacheRoute(key, candidate.Name)
+		return d.wrapConnection(conn, candidate.Name), nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no outbound path available")
 	}
 	return nil, lastErr
+}
+
+func (d *AdaptiveDialer) dialCandidate(ctx context.Context, network, address string, candidate Candidate) (net.Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	conn, err := candidate.Dialer.DialContext(ctx, network, address)
+	d.recordAttempt(candidate.Name, err == nil)
+	return conn, err
+}
+
+func (d *AdaptiveDialer) wrapConnection(conn net.Conn, candidateName string) net.Conn {
+	return &throughputConn{
+		Conn: conn,
+		onClose: func(bytes uint64, span time.Duration) {
+			d.recordThroughput(candidateName, bytes, span)
+		},
+	}
+}
+
+func destinationKey(network, address string) string {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return strings.ToLower(address)
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if ip := net.ParseIP(host); ip != nil {
+		host = ip.String()
+	}
+	return network + "|" + net.JoinHostPort(host, port)
+}
+
+func (d *AdaptiveDialer) cachedCandidate(key string) (Candidate, bool) {
+	now := time.Now()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.pruneRoutesLocked(now)
+	decision, ok := d.routes[key]
+	if !ok || !decision.expiresAt.After(now) {
+		delete(d.routes, key)
+		return Candidate{}, false
+	}
+	for _, candidate := range d.candidates {
+		if candidate.Name == decision.candidateName {
+			return candidate, true
+		}
+	}
+	delete(d.routes, key)
+	return Candidate{}, false
+}
+
+func (d *AdaptiveDialer) cacheRoute(key, candidateName string) {
+	now := time.Now()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.pruneRoutesLocked(now)
+	if _, exists := d.routes[key]; !exists && len(d.routes) >= maxDestinationRoutes {
+		var oldestKey string
+		var oldest time.Time
+		for routeKey, decision := range d.routes {
+			if oldest.IsZero() || decision.expiresAt.Before(oldest) {
+				oldestKey, oldest = routeKey, decision.expiresAt
+			}
+		}
+		delete(d.routes, oldestKey)
+	}
+	ttl := d.routeTTL
+	if ttl <= 0 {
+		ttl = defaultDestinationRouteTTL
+	}
+	d.routes[key] = routeDecision{candidateName: candidateName, expiresAt: now.Add(ttl)}
+}
+
+func (d *AdaptiveDialer) invalidateRoute(key, candidateName string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if decision, ok := d.routes[key]; ok && decision.candidateName == candidateName {
+		delete(d.routes, key)
+	}
+}
+
+func (d *AdaptiveDialer) pruneRoutesLocked(now time.Time) {
+	for key, decision := range d.routes {
+		if !decision.expiresAt.After(now) {
+			delete(d.routes, key)
+		}
+	}
 }
 
 func (d *AdaptiveDialer) orderedCandidates() []Candidate {
@@ -183,10 +304,14 @@ type throughputConn struct {
 }
 
 func (c *throughputConn) account(n int) {
-	if n <= 0 { return }
+	if n <= 0 {
+		return
+	}
 	now := time.Now()
 	c.mu.Lock()
-	if c.first.IsZero() { c.first = now }
+	if c.first.IsZero() {
+		c.first = now
+	}
 	c.last = now
 	c.bytes += uint64(n)
 	c.mu.Unlock()
