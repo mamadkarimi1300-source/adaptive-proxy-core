@@ -28,7 +28,11 @@ func TestAdaptiveDialerExploresCandidates(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 
 	for i := 0; i < 2; i++ {
-		conn, err := dialer.DialContext(context.Background(), "tcp", "example.com:443")
+		address := "example.com:443"
+		if i == 1 {
+			address = "example.org:443"
+		}
+		conn, err := dialer.DialContext(context.Background(), "tcp", address)
 		if err != nil { t.Fatal(err) }
 		_ = conn.Close()
 	}
