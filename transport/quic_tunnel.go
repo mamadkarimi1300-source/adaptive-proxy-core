@@ -113,7 +113,7 @@ func handleQUICSession(ctx context.Context, session *quic.Conn, token string, di
 	}
 }
 
-func handleQUICStream(ctx context.Context, stream quic.Stream, token string, dialTimeout time.Duration) {
+func handleQUICStream(ctx context.Context, stream *quic.Stream, token string, dialTimeout time.Duration) {
 	defer stream.Close()
 	readString := func() (string, error) {
 		var size uint16
@@ -153,7 +153,7 @@ func handleQUICStream(ctx context.Context, stream quic.Stream, token string, dia
 }
 
 type quicStreamConn struct {
-	quic.Stream
+	*quic.Stream
 	conn *quic.Conn
 }
 
