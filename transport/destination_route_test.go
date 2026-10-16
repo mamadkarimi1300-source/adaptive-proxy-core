@@ -3,7 +3,6 @@ package transport
 import (
 	"context"
 	"errors"
-	"net"
 	"testing"
 	"time"
 )
@@ -124,4 +123,3 @@ func TestDestinationKeyNormalizesHost(t *testing.T) {
 
 // Ensure the fake dialer used by these tests satisfies the production interface.
 var _ Dialer = (*testDialer)(nil)
-var _ net.Conn = (net.Conn)(nil)
