@@ -162,6 +162,9 @@ func (c *quicStreamConn) LocalAddr() net.Addr { return c.conn.LocalAddr() }
 func (c *quicStreamConn) RemoteAddr() net.Addr { return c.conn.RemoteAddr() }
 func (c *quicStreamConn) Close() error {
 	c.Stream.CancelRead(0)
-	return c.Stream.Close()
+	streamErr := c.Stream.Close()
+	connErr := c.conn.CloseWithError(0, "stream closed")
+	if streamErr != nil { return streamErr }
+	return connErr
 }
 func (c *quicStreamConn) CloseWrite() error { return c.Stream.Close() }
