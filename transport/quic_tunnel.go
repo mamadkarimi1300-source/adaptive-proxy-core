@@ -104,7 +104,7 @@ func ServeQUIC(ctx context.Context, listener *quic.Listener, token string, dialT
 	}
 }
 
-func handleQUICSession(ctx context.Context, session quic.Connection, token string, dialTimeout time.Duration) {
+func handleQUICSession(ctx context.Context, session *quic.Conn, token string, dialTimeout time.Duration) {
 	defer session.CloseWithError(0, "session ended")
 	for {
 		stream, err := session.AcceptStream(ctx)
@@ -155,7 +155,7 @@ func handleQUICStream(ctx context.Context, stream quic.Stream, session quic.Conn
 
 type quicStreamConn struct {
 	quic.Stream
-	conn quic.Connection
+	conn *quic.Conn
 }
 
 func (c *quicStreamConn) LocalAddr() net.Addr { return c.conn.LocalAddr() }
