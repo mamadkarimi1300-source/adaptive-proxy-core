@@ -203,6 +203,14 @@ func (c *throughputConn) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// CloseWrite preserves half-close support when the underlying transport exposes it.
+func (c *throughputConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return errors.New("underlying connection does not support CloseWrite")
+}
+
 func (c *throughputConn) Close() error {
 	err := c.Conn.Close()
 	c.once.Do(func() {
