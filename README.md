@@ -6,7 +6,7 @@ A small Go application-level proxy core. The local entry point is SOCKS5; outbou
 
 - SOCKS5 no-authentication negotiation and TCP `CONNECT` for IPv4, IPv6, and domain names.
 - Direct outbound TCP and optional QUIC-over-UDP tunnel transport.
-- Adaptive path selection based on observed connection setup latency (EWMA), with fallback when a selected path fails.
+- Adaptive path selection based on measured application goodput (EWMA Mbps), with fallback when a selected path fails.
 - QUIC tunnel authentication using a shared token protected by TLS 1.3.
 - Session byte counters, connection lifecycle tracking, and graceful local listener shutdown.
 
@@ -42,7 +42,7 @@ $env:PROXY_QUIC_TOKEN = "replace-with-a-long-random-secret"
 go run ./cmd/proxy
 ```
 
-When configured, the selector explores both direct TCP and QUIC-tunnel paths, measures real connection setup duration, and prefers the path with the lower smoothed latency. Failed paths are penalized and the other candidate is attempted. This is not a download-speed benchmark: throughput measurement and periodic active probes are future work. The initial implementation creates a QUIC session for each tunneled connection; connection pooling can be added after correctness and measurements are established.
+When configured, the selector explores both direct TCP and QUIC-tunnel paths, then ranks paths using observed application goodput in Mbps. It passively counts bytes transferred through each connection and computes an exponentially weighted moving average (EWMA); samples smaller than 512 KiB or shorter than 250 ms are ignored. Connections without sufficient samples are explored for up to three attempts before the selector relies on measured candidates. Failed paths are penalized and the next candidate is attempted. This is an estimate of application goodput over a connection's observed transfer interval, not a guaranteed link capacity or a controlled benchmark. It may be skewed by idle time, destination/server limits, workload direction, and the extra latency of creating a new QUIC session per connection. The initial implementation does not generate synthetic traffic or send bandwidth tests to arbitrary public destinations. For meaningful comparisons, use a server you control with the same test payload and run repeatable tests under comparable load; active probing should be explicitly configured and rate-limited before it is added.
 
 ## Run the remote QUIC proxy server
 
