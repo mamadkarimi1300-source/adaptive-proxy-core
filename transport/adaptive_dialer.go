@@ -89,12 +89,13 @@ func (d *AdaptiveDialer) orderedCandidates() []Candidate {
 	defer d.mu.Unlock()
 
 	ordered := append([]Candidate(nil), d.candidates...)
-	// Try each candidate at least once and give unmeasured candidates up to
-	// three attempts to produce enough real traffic for a goodput sample.
+	// Keep rotating paths without a valid goodput sample. Short or idle sessions
+	// are not evidence of a path's throughput, so exploration continues until
+	// a candidate yields enough real application traffic.
 	for i := 0; i < len(ordered); i++ {
 		idx := (d.nextExplore + i) % len(ordered)
 		stats := d.stats[ordered[idx].Name]
-		if stats.samples == 0 && stats.attempts < 3 {
+		if stats.samples == 0 {
 			d.nextExplore = (idx + 1) % len(ordered)
 			first := ordered[idx]
 			ordered = append(ordered[:idx], ordered[idx+1:]...)
