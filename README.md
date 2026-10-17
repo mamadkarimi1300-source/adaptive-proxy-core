@@ -60,15 +60,19 @@ Allow UDP traffic to the configured port in the server firewall. Do not run the 
 
 ## Live connection logs
 
-The local proxy writes live connection lifecycle and transport-selection events to standard output. Logs include the SOCKS5 client peer, requested destination, selected transport candidate, dial duration, fallback failures, completed-session byte counts, and measured application goodput when a sample is large/long enough. Traffic payloads are not logged.
+The local proxy writes live connection lifecycle and transport-selection events to standard output. Logs include the SOCKS5 client peer, requested destination, selected transport candidate, explicit outer transport protocol/network, final-destination protocol, dial duration, fallback failures, completed-session byte counts, and measured application goodput when a sample is large/long enough. Traffic payloads are not logged. For `quic-tunnel`, `protocol=QUIC network=UDP destination_protocol=TCP` means the local proxy reaches the remote proxy over QUIC/UDP, while the remote proxy opens a TCP connection to the final destination. For `tcp-direct`, all three fields are TCP/TCP/TCP.
 
 Example events:
 
 ```text
 socks5 CONNECT requested peer=127.0.0.1:53124 destination=example.com:443
-transport dial attempt destination=example.com:443 path=tcp-direct
-transport dial succeeded destination=example.com:443 path=tcp-direct duration=120ms
-socks5 CONNECT established peer=127.0.0.1:53124 destination=example.com:443 duration=121ms
+transport dial attempt destination=example.com:443 path=tcp-direct protocol=TCP network=TCP destination_protocol=TCP
+transport dial succeeded destination=example.com:443 path=tcp-direct protocol=TCP network=TCP destination_protocol=TCP duration=120ms
+socks5 CONNECT established peer=127.0.0.1:53124 destination=example.com:443 path=tcp-direct protocol=TCP network=TCP destination_protocol=TCP duration=121ms
+
+# When the QUIC tunnel candidate is selected:
+transport dial succeeded destination=example.com:443 path=quic-tunnel protocol=QUIC network=UDP destination_protocol=TCP duration=120ms
+socks5 CONNECT established peer=127.0.0.1:53124 destination=example.com:443 path=quic-tunnel protocol=QUIC network=UDP destination_protocol=TCP duration=121ms
 socks5 session finished peer=127.0.0.1:53124 destination=example.com:443 sent_bytes=120 received_bytes=4096 duration=850ms error=<nil>
 ```
 
