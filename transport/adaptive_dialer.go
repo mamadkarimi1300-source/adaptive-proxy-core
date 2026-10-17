@@ -82,7 +82,8 @@ func NewAdaptiveDialer(candidates ...Candidate) (*AdaptiveDialer, error) {
 func (d *AdaptiveDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	key := destinationKey(network, address)
 	if cached, ok := d.cachedCandidate(key); ok {
-		log.Printf("transport route cache hit destination=%s path=%s", address, cached.Name)
+		protocol, network, destinationProtocol := transportLogDetails(cached.Name)
+		log.Printf("transport route cache hit destination=%s path=%s protocol=%s network=%s destination_protocol=%s", address, cached.Name, protocol, network, destinationProtocol)
 		conn, err := d.dialCandidate(ctx, network, address, cached)
 		if err == nil {
 			return d.wrapConnection(conn, cached.Name), nil
@@ -90,7 +91,8 @@ func (d *AdaptiveDialer) DialContext(ctx context.Context, network, address strin
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		log.Printf("transport cached path failed; trying fallback destination=%s path=%s error=%v", address, cached.Name, err)
+		protocol, network, destinationProtocol := transportLogDetails(cached.Name)
+		log.Printf("transport cached path failed; trying fallback destination=%s path=%s protocol=%s network=%s destination_protocol=%s error=%v", address, cached.Name, protocol, network, destinationProtocol, err)
 		d.invalidateRoute(key, cached.Name)
 		return d.dialFallbacks(ctx, network, address, key, cached.Name)
 	}
@@ -126,20 +128,22 @@ func (d *AdaptiveDialer) dialCandidate(ctx context.Context, network, address str
 		return nil, err
 	}
 	started := time.Now()
-	log.Printf("transport dial attempt destination=%s path=%s", address, candidate.Name)
+	protocol, network, destinationProtocol := transportLogDetails(candidate.Name)
+	log.Printf("transport dial attempt destination=%s path=%s protocol=%s network=%s destination_protocol=%s", address, candidate.Name, protocol, network, destinationProtocol)
 	conn, err := candidate.Dialer.DialContext(ctx, network, address)
 	d.recordAttempt(candidate.Name, err == nil)
 	if err != nil {
-		log.Printf("transport dial failed destination=%s path=%s duration=%s error=%v", address, candidate.Name, time.Since(started).Round(time.Millisecond), err)
+		log.Printf("transport dial failed destination=%s path=%s protocol=%s network=%s destination_protocol=%s duration=%s error=%v", address, candidate.Name, protocol, network, destinationProtocol, time.Since(started).Round(time.Millisecond), err)
 		return conn, err
 	}
-	log.Printf("transport dial succeeded destination=%s path=%s duration=%s", address, candidate.Name, time.Since(started).Round(time.Millisecond))
+	log.Printf("transport dial succeeded destination=%s path=%s protocol=%s network=%s destination_protocol=%s duration=%s", address, candidate.Name, protocol, network, destinationProtocol, time.Since(started).Round(time.Millisecond))
 	return conn, nil
 }
 
 func (d *AdaptiveDialer) wrapConnection(conn net.Conn, candidateName string) net.Conn {
 	return &throughputConn{
 		Conn: conn,
+		candidateName: candidateName,
 		onClose: func(bytes uint64, span time.Duration) {
 			d.recordThroughput(candidateName, bytes, span)
 		},
@@ -305,14 +309,41 @@ func (d *AdaptiveDialer) Snapshot() map[string]float64 {
 	return result
 }
 
+// transportLogDetails distinguishes the local-to-remote transport from the
+// remote proxy's connection to the final destination.
+func transportLogDetails(candidateName string) (protocol, network, destinationProtocol string) {
+	if candidateName == "quic-tunnel" {
+		return "QUIC", "UDP", "TCP"
+	}
+	return "TCP", "TCP", "TCP"
+}
+
+// DescribeConnection reports the selected candidate's transport metadata.
+// Unknown connections are explicitly marked rather than guessed.
+func DescribeConnection(conn net.Conn) (protocol, network, destinationProtocol, path string) {
+	info, ok := conn.(interface {
+		TransportInfo() (protocol, network, destinationProtocol, path string)
+	})
+	if !ok {
+		return "unknown", "unknown", "unknown", "unknown"
+	}
+	return info.TransportInfo()
+}
+
 type throughputConn struct {
 	net.Conn
+	candidateName string
 	mu      sync.Mutex
 	bytes   uint64
 	first   time.Time
 	last    time.Time
 	onClose func(uint64, time.Duration)
 	once    sync.Once
+}
+
+func (c *throughputConn) TransportInfo() (protocol, network, destinationProtocol, path string) {
+	protocol, network, destinationProtocol = transportLogDetails(c.candidateName)
+	return protocol, network, destinationProtocol, c.candidateName
 }
 
 func (c *throughputConn) account(n int) {
