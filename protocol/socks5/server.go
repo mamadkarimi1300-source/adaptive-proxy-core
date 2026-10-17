@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"strconv"
 	"strings"
@@ -53,6 +54,12 @@ func (s *Server) ServeConn(ctx context.Context, client net.Conn) error {
 		return errors.New("nil client connection")
 	}
 	defer client.Close()
+	started := time.Now()
+	clientAddr := client.RemoteAddr().String()
+	log.Printf("socks5 client connected peer=%s", clientAddr)
+	defer func() {
+		log.Printf("socks5 client closed peer=%s duration=%s", clientAddr, time.Since(started).Round(time.Millisecond))
+	}()
 	if s.Dialer == nil || s.Proxy == nil {
 		return errors.New("SOCKS5 server requires a dialer and proxy")
 	}
@@ -69,11 +76,15 @@ func (s *Server) ServeConn(ctx context.Context, client net.Conn) error {
 	_ = client.SetDeadline(time.Time{})
 
 	target := net.JoinHostPort(host, strconv.Itoa(int(port)))
+	log.Printf("socks5 CONNECT requested peer=%s destination=%s", clientAddr, target)
+	dialStarted := time.Now()
 	upstream, err := s.Dialer.DialContext(ctx, "tcp", target)
 	if err != nil {
+		log.Printf("socks5 CONNECT failed peer=%s destination=%s duration=%s error=%v", clientAddr, target, time.Since(dialStarted).Round(time.Millisecond), err)
 		_ = writeReply(client, mapDialError(err))
 		return fmt.Errorf("dial target %s: %w", target, err)
 	}
+	log.Printf("socks5 CONNECT established peer=%s destination=%s duration=%s", clientAddr, target, time.Since(dialStarted).Round(time.Millisecond))
 	defer upstream.Close()
 
 	if err := writeReply(client, replySucceeded); err != nil {
@@ -82,8 +93,11 @@ func (s *Server) ServeConn(ctx context.Context, client net.Conn) error {
 
 	localConn := connection.NewNetConnection(client)
 	remoteConn := connection.NewNetConnection(upstream)
-	session := core.NewSession(client.RemoteAddr().String(), localConn, remoteConn)
-	return s.Proxy.Handle(session)
+	session := core.NewSession(clientAddr, localConn, remoteConn)
+	err = s.Proxy.Handle(session)
+	log.Printf("socks5 session finished peer=%s destination=%s sent_bytes=%d received_bytes=%d duration=%s error=%v",
+		clientAddr, target, session.BytesSent, session.BytesReceived, time.Since(started).Round(time.Millisecond), err)
+	return err
 }
 
 func negotiate(rw io.ReadWriter) error {
