@@ -84,7 +84,8 @@ func (s *Server) ServeConn(ctx context.Context, client net.Conn) error {
 		_ = writeReply(client, mapDialError(err))
 		return fmt.Errorf("dial target %s: %w", target, err)
 	}
-	log.Printf("socks5 CONNECT established peer=%s destination=%s duration=%s", clientAddr, target, time.Since(dialStarted).Round(time.Millisecond))
+	protocol, network, destinationProtocol, path := transport.DescribeConnection(upstream)
+	log.Printf("socks5 CONNECT established peer=%s destination=%s path=%s protocol=%s network=%s destination_protocol=%s duration=%s", clientAddr, target, path, protocol, network, destinationProtocol, time.Since(dialStarted).Round(time.Millisecond))
 	defer upstream.Close()
 
 	if err := writeReply(client, replySucceeded); err != nil {
