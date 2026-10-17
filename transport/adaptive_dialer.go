@@ -275,7 +275,6 @@ func (d *AdaptiveDialer) recordThroughput(name string, bytes uint64, span time.D
 		return
 	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	stats := d.stats[name]
 	if stats.samples == 0 {
 		stats.throughputMbps = mbps
@@ -287,7 +286,9 @@ func (d *AdaptiveDialer) recordThroughput(name string, bytes uint64, span time.D
 		stats.failures--
 	}
 	d.stats[name] = stats
-	log.Printf("transport goodput measured path=%s mbps=%.2f sample_bytes=%d span=%s", name, stats.throughputMbps, bytes, span.Round(time.Millisecond))
+	measuredMbps := stats.throughputMbps
+	d.mu.Unlock()
+	log.Printf("transport goodput measured path=%s mbps=%.2f sample_bytes=%d span=%s", name, measuredMbps, bytes, span.Round(time.Millisecond))
 }
 
 // Snapshot returns measured EWMA application goodput in megabits per second.
