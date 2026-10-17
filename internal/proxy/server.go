@@ -42,12 +42,17 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	ln, err := net.Listen("tcp", s.Address)
 	if err != nil { return fmt.Errorf("listen %s: %w", s.Address, err) }
 	defer ln.Close()
+	var wg sync.WaitGroup
+	var active sync.Map
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
+		active.Range(func(key, value any) bool {
+			if conn, ok := value.(net.Conn); ok { _ = conn.Close() }
+			return true
+		})
 	}()
 	if s.Logger != nil { s.Logger.Printf("SOCKS5 listening on %s", ln.Addr()) }
-	var wg sync.WaitGroup
 	defer wg.Wait()
 	for {
 		conn, err := ln.Accept()
@@ -59,9 +64,11 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 			}
 			return err
 		}
+		active.Store(conn, conn)
 		wg.Add(1)
 		go func(c net.Conn) {
 			defer wg.Done()
+			defer active.Delete(c)
 			defer c.Close()
 			s.handle(ctx, c)
 		}(conn)
