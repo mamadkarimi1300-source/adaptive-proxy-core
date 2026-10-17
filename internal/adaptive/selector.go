@@ -106,6 +106,7 @@ func (s *Selector) orderedTransports(preferred string) []transport.Dialer {
 	defer s.mu.RUnlock()
 	out := append([]transport.Dialer(nil), s.transports...)
 	sort.SliceStable(out, func(i, j int) bool {
+		if i == j { return false }
 		ni, nj := out[i].Name(), out[j].Name()
 		if ni == preferred { return true }
 		if nj == preferred { return false }
