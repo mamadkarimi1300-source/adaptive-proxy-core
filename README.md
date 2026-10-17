@@ -58,6 +58,20 @@ go run ./cmd/quic-server
 
 Allow UDP traffic to the configured port in the server firewall. Do not run the remote server without a strong token: it can connect to TCP destinations on behalf of authenticated clients. Keep the token secret and rotate it if exposed.
 
+## Live connection logs
+
+The local proxy writes live connection lifecycle and transport-selection events to standard output. Logs include the SOCKS5 client peer, requested destination, selected transport candidate, dial duration, fallback failures, completed-session byte counts, and measured application goodput when a sample is large/long enough. Traffic payloads are not logged.
+
+Example events:
+
+```text
+socks5 CONNECT requested peer=127.0.0.1:53124 destination=example.com:443
+transport dial attempt destination=example.com:443 path=tcp-direct
+transport dial succeeded destination=example.com:443 path=tcp-direct duration=120ms
+socks5 CONNECT established peer=127.0.0.1:53124 destination=example.com:443 duration=121ms
+socks5 session finished peer=127.0.0.1:53124 destination=example.com:443 sent_bytes=120 received_bytes=4096 duration=850ms error=<nil>
+```
+
 ## Configuration
 
 Local process:
