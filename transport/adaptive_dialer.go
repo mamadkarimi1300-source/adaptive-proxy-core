@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"sync"
@@ -81,6 +82,7 @@ func NewAdaptiveDialer(candidates ...Candidate) (*AdaptiveDialer, error) {
 func (d *AdaptiveDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	key := destinationKey(network, address)
 	if cached, ok := d.cachedCandidate(key); ok {
+		log.Printf("transport route cache hit destination=%s path=%s", address, cached.Name)
 		conn, err := d.dialCandidate(ctx, network, address, cached)
 		if err == nil {
 			return d.wrapConnection(conn, cached.Name), nil
@@ -88,6 +90,7 @@ func (d *AdaptiveDialer) DialContext(ctx context.Context, network, address strin
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		log.Printf("transport cached path failed; trying fallback destination=%s path=%s error=%v", address, cached.Name, err)
 		d.invalidateRoute(key, cached.Name)
 		return d.dialFallbacks(ctx, network, address, key, cached.Name)
 	}
@@ -122,9 +125,16 @@ func (d *AdaptiveDialer) dialCandidate(ctx context.Context, network, address str
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	started := time.Now()
+	log.Printf("transport dial attempt destination=%s path=%s", address, candidate.Name)
 	conn, err := candidate.Dialer.DialContext(ctx, network, address)
 	d.recordAttempt(candidate.Name, err == nil)
-	return conn, err
+	if err != nil {
+		log.Printf("transport dial failed destination=%s path=%s duration=%s error=%v", address, candidate.Name, time.Since(started).Round(time.Millisecond), err)
+		return conn, err
+	}
+	log.Printf("transport dial succeeded destination=%s path=%s duration=%s", address, candidate.Name, time.Since(started).Round(time.Millisecond))
+	return conn, nil
 }
 
 func (d *AdaptiveDialer) wrapConnection(conn net.Conn, candidateName string) net.Conn {
@@ -265,7 +275,6 @@ func (d *AdaptiveDialer) recordThroughput(name string, bytes uint64, span time.D
 		return
 	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	stats := d.stats[name]
 	if stats.samples == 0 {
 		stats.throughputMbps = mbps
@@ -277,6 +286,9 @@ func (d *AdaptiveDialer) recordThroughput(name string, bytes uint64, span time.D
 		stats.failures--
 	}
 	d.stats[name] = stats
+	measuredMbps := stats.throughputMbps
+	d.mu.Unlock()
+	log.Printf("transport goodput measured path=%s mbps=%.2f sample_bytes=%d span=%s", name, measuredMbps, bytes, span.Round(time.Millisecond))
 }
 
 // Snapshot returns measured EWMA application goodput in megabits per second.
