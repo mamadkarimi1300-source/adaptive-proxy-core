@@ -91,7 +91,7 @@ func (d *AdaptiveDialer) DialContext(ctx context.Context, network, address strin
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		protocol, network, destinationProtocol := transportLogDetails(cached.Name)
+		protocol, network, destinationProtocol = transportLogDetails(cached.Name)
 		log.Printf("transport cached path failed; trying fallback destination=%s path=%s protocol=%s network=%s destination_protocol=%s error=%v", address, cached.Name, protocol, network, destinationProtocol, err)
 		d.invalidateRoute(key, cached.Name)
 		return d.dialFallbacks(ctx, network, address, key, cached.Name)
