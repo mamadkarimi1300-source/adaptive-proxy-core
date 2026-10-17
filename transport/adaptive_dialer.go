@@ -82,8 +82,8 @@ func NewAdaptiveDialer(candidates ...Candidate) (*AdaptiveDialer, error) {
 func (d *AdaptiveDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	key := destinationKey(network, address)
 	if cached, ok := d.cachedCandidate(key); ok {
-		protocol, network, destinationProtocol := transportLogDetails(cached.Name)
-		log.Printf("transport route cache hit destination=%s path=%s protocol=%s network=%s destination_protocol=%s", address, cached.Name, protocol, network, destinationProtocol)
+		protocol, transportNetwork, destinationProtocol := transportLogDetails(cached.Name)
+		log.Printf("transport route cache hit destination=%s path=%s protocol=%s network=%s destination_protocol=%s", address, cached.Name, protocol, transportNetwork, destinationProtocol)
 		conn, err := d.dialCandidate(ctx, network, address, cached)
 		if err == nil {
 			return d.wrapConnection(conn, cached.Name), nil
@@ -91,8 +91,8 @@ func (d *AdaptiveDialer) DialContext(ctx context.Context, network, address strin
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		protocol, network, destinationProtocol = transportLogDetails(cached.Name)
-		log.Printf("transport cached path failed; trying fallback destination=%s path=%s protocol=%s network=%s destination_protocol=%s error=%v", address, cached.Name, protocol, network, destinationProtocol, err)
+		protocol, transportNetwork, destinationProtocol = transportLogDetails(cached.Name)
+		log.Printf("transport cached path failed; trying fallback destination=%s path=%s protocol=%s network=%s destination_protocol=%s error=%v", address, cached.Name, protocol, transportNetwork, destinationProtocol, err)
 		d.invalidateRoute(key, cached.Name)
 		return d.dialFallbacks(ctx, network, address, key, cached.Name)
 	}
@@ -128,15 +128,15 @@ func (d *AdaptiveDialer) dialCandidate(ctx context.Context, network, address str
 		return nil, err
 	}
 	started := time.Now()
-	protocol, network, destinationProtocol := transportLogDetails(candidate.Name)
-	log.Printf("transport dial attempt destination=%s path=%s protocol=%s network=%s destination_protocol=%s", address, candidate.Name, protocol, network, destinationProtocol)
+	protocol, transportNetwork, destinationProtocol := transportLogDetails(candidate.Name)
+	log.Printf("transport dial attempt destination=%s path=%s protocol=%s network=%s destination_protocol=%s", address, candidate.Name, protocol, transportNetwork, destinationProtocol)
 	conn, err := candidate.Dialer.DialContext(ctx, network, address)
 	d.recordAttempt(candidate.Name, err == nil)
 	if err != nil {
-		log.Printf("transport dial failed destination=%s path=%s protocol=%s network=%s destination_protocol=%s duration=%s error=%v", address, candidate.Name, protocol, network, destinationProtocol, time.Since(started).Round(time.Millisecond), err)
+		log.Printf("transport dial failed destination=%s path=%s protocol=%s network=%s destination_protocol=%s duration=%s error=%v", address, candidate.Name, protocol, transportNetwork, destinationProtocol, time.Since(started).Round(time.Millisecond), err)
 		return conn, err
 	}
-	log.Printf("transport dial succeeded destination=%s path=%s protocol=%s network=%s destination_protocol=%s duration=%s", address, candidate.Name, protocol, network, destinationProtocol, time.Since(started).Round(time.Millisecond))
+	log.Printf("transport dial succeeded destination=%s path=%s protocol=%s network=%s destination_protocol=%s duration=%s", address, candidate.Name, protocol, transportNetwork, destinationProtocol, time.Since(started).Round(time.Millisecond))
 	return conn, nil
 }
 
