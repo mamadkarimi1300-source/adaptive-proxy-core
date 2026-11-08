@@ -29,7 +29,10 @@ The current build has only TCP registered, so it provides the adaptive selection
 
 ## Run
 
+On a fresh checkout, resolve dependencies and generate the local checksum file once:
+
 ```sh
+go mod tidy
 go run ./cmd/proxy
 ```
 
