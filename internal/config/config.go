@@ -5,11 +5,15 @@ import (
 	"strings"
 )
 
-const defaultListenAddress = "127.0.0.1:1080"
+const (
+	defaultListenAddress = "127.0.0.1:1080"
+	defaultLogDBPath     = "data/proxy.db"
+)
 
 // Config contains process-level settings.
 type Config struct {
 	ListenAddress string
+	LogDBPath     string
 }
 
 // Load reads configuration from environment variables.
@@ -18,5 +22,12 @@ func Load() Config {
 	if addr == "" {
 		addr = defaultListenAddress
 	}
-	return Config{ListenAddress: addr}
+	dbPath := strings.TrimSpace(os.Getenv("PROXY_LOG_DB_PATH"))
+	if dbPath == "" {
+		dbPath = defaultLogDBPath
+	}
+	return Config{
+		ListenAddress: addr,
+		LogDBPath:     dbPath,
+	}
 }
