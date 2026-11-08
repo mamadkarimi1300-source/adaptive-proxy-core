@@ -33,7 +33,8 @@ func main() {
 
 	selector, err := adaptive.NewSelector(transport.TCP{})
 	if err != nil {
-		logger.Fatal(err)
+		logger.Printf("initialize adaptive selector: %v", err)
+		return
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
