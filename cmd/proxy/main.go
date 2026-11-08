@@ -21,7 +21,8 @@ func main() {
 
 	store, err := sqlite.Open(cfg.LogDBPath)
 	if err != nil {
-		logger.Fatal(err)
+		logger.Printf("initialize adaptive selector: %v", err)
+		return
 	}
 	eventLogger := storage.NewLogger(store, 1024)
 	defer func() {
@@ -44,6 +45,6 @@ func main() {
 		Events:   eventLogger,
 	}
 	if err := server.ListenAndServe(ctx); err != nil {
-		logger.Fatal(err)
+		logger.Printf("proxy server stopped: %v", err)
 	}
 }
