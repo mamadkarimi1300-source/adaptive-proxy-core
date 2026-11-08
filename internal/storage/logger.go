@@ -10,7 +10,9 @@ type Logger struct {
 	repository Repository
 	queue      chan Event
 	done       chan struct{}
-	closeOnce  sync.Once
+	mu         sync.Mutex
+	closed     bool
+	closeErr   error
 	dropped    atomic.Uint64
 }
 
@@ -34,10 +36,11 @@ func (l *Logger) Record(event Event) {
 	if l == nil {
 		return
 	}
-	select {
-	case <-l.done:
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
 		l.dropped.Add(1)
-	default:
+		return
 	}
 	select {
 	case l.queue <- event:
@@ -61,18 +64,20 @@ func (l *Logger) Close() error {
 	if l == nil {
 		return nil
 	}
-	var closeErr error
-	l.closeOnce.Do(func() {
-		close(l.done)
+	l.mu.Lock()
+	if !l.closed {
+		l.closed = true
 		close(l.queue)
-	})
+	}
+	l.mu.Unlock()
 	<-l.done
-	return closeErr
+	return l.closeErr
 }
 
 func (l *Logger) writeLoop() {
+	defer close(l.done)
 	defer func() {
-		_ = l.repository.Close()
+		l.closeErr = l.repository.Close()
 	}()
 	for event := range l.queue {
 		_ = l.repository.InsertEvent(event)
